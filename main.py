@@ -67,24 +67,21 @@ def embed(title, desc="", color=0x5865F2):
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-# ================= SERVER ROLE SYSTEM =================
+# ================= ROLE SYSTEM =================
 def get_admin_role(guild_id):
     cursor.execute("SELECT admin_role_id FROM guild_config WHERE guild_id=?", (guild_id,))
     r = cursor.fetchone()
     return r[0] if r else None
 
 def is_admin(member: discord.Member):
-    if member is None:
-        return False
-
     if member.guild_permissions.administrator:
         return True
 
     role_id = get_admin_role(member.guild.id)
     return role_id and any(r.id == role_id for r in member.roles)
 
-# ================= ROLE SET =================
-@bot.tree.command(name="역할", description="봇 관리자 역할 설정")
+# ================= ROLE SET COMMAND =================
+@bot.tree.command(name="역할")
 async def set_role(interaction: discord.Interaction, role: discord.Role):
 
     if not interaction.user.guild_permissions.administrator:
@@ -93,9 +90,7 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
     cursor.execute("REPLACE INTO guild_config VALUES(?,?)", (interaction.guild.id, role.id))
     conn.commit()
 
-    await interaction.response.send_message(
-        embed=embed("설정 완료", f"봇 관리자 역할 → {role.mention}")
-    )
+    await interaction.response.send_message(embed=embed("설정 완료", f"관리자 역할: {role.mention}"))
 
 # ================= WARNING SYSTEM =================
 def get_warn(uid):
@@ -125,19 +120,14 @@ async def auto_punish(member: discord.Member, count: int):
     try:
         if count == 1:
             await member.timeout(datetime.timedelta(minutes=10))
-
         elif count == 2:
             await member.timeout(datetime.timedelta(hours=1))
-
         elif count == 3:
             await member.timeout(datetime.timedelta(days=1))
-
         elif count == 4:
             await member.kick()
-
         elif count >= 5:
             await member.ban()
-
     except:
         pass
 
@@ -147,7 +137,7 @@ async def remove_punish(member: discord.Member):
     except:
         pass
 
-# ================= LEVEL =================
+# ================= LEVEL SYSTEM =================
 def add_xp(uid):
     cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
@@ -171,10 +161,9 @@ class VerifyView(discord.ui.View):
 
         role = i.guild.get_role(VERIFY_ROLE_ID)
 
-        if role is None:
+        if not role:
             role = discord.utils.get(i.guild.roles, name="인증")
-
-        if role is None:
+        if not role:
             role = await i.guild.create_role(name="인증")
 
         await i.user.add_roles(role)
@@ -207,19 +196,21 @@ class TicketView(discord.ui.View):
 
         await ch.send(i.user.mention, view=CloseView())
 
-        await i.response.send_message("티켓 생성 완료", ephemeral=True)
+        await i.response.send_message(
+            embed=embed("티켓 생성", "채널이 생성되었습니다"),
+            ephemeral=True
+        )
 
 # ================= EVENTS =================
 @bot.event
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 ULTIMATE BOT READY")
+    print("🔥 FINAL BOT READY")
 
 @bot.event
 async def on_member_join(member):
     ch = bot.get_channel(WELCOME_CHANNEL_ID)
-
     if ch:
         await ch.send(embed=embed("환영", member.mention))
 
@@ -243,64 +234,56 @@ async def on_message(m):
 # ================= SLASH COMMANDS =================
 
 @bot.tree.command(name="경고")
-async def warn(interaction: discord.Interaction, user: discord.Member, reason: str = "없음"):
+async def warn(i: discord.Interaction, user: discord.Member, reason: str = "없음"):
 
-    member = interaction.guild.get_member(interaction.user.id)
-
-    if not is_admin(member):
-        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = add_warn(user.id)
     await auto_punish(user, c)
 
-    await interaction.response.send_message(
-        embed=embed("경고", f"{user.mention}\n{reason}\n누적: {c}")
+    await i.response.send_message(
+        embed=embed("경고 추가", f"{user.mention}\n{reason}\n누적: {c}")
     )
 
 @bot.tree.command(name="경고감소")
-async def warn_minus(interaction: discord.Interaction, user: discord.Member):
+async def warn_minus(i, user: discord.Member):
 
-    member = interaction.guild.get_member(interaction.user.id)
-
-    if not is_admin(member):
-        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = remove_warn(user.id)
     await auto_punish(user, c)
 
-    await interaction.response.send_message(
-        embed=embed("감소", f"{user.mention} → {c}")
-    )
+    await i.response.send_message(embed=embed("감소", f"{user.mention} → {c}"))
 
 @bot.tree.command(name="경고삭제")
-async def warn_clear(interaction: discord.Interaction, user: discord.Member):
+async def warn_clear(i, user: discord.Member):
 
-    member = interaction.guild.get_member(interaction.user.id)
-
-    if not is_admin(member):
-        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     clear_warn(user.id)
     await remove_punish(user)
 
-    await interaction.response.send_message(
-        embed=embed("초기화", f"{user.mention} 모든 경고 삭제 + 처벌 해제")
+    await i.response.send_message(
+        embed=embed("초기화", f"{user.mention} 경고 + 처벌 해제")
     )
 
 @bot.tree.command(name="경고확인")
-async def warn_check(interaction: discord.Interaction, user: discord.Member):
+async def warn_check(i, user: discord.Member):
 
-    await interaction.response.send_message(
-        embed=embed("경고", f"{user.mention} → {get_warn(user.id)}회")
+    await i.response.send_message(
+        embed=embed("경고 확인", f"{user.mention} → {get_warn(user.id)}회")
     )
 
 @bot.tree.command(name="인증패널")
-async def verify_panel(interaction: discord.Interaction):
-    await interaction.response.send_message("인증", view=VerifyView())
+async def verify_panel(i):
+    await i.response.send_message("인증", view=VerifyView())
 
 @bot.tree.command(name="티켓패널")
-async def ticket_panel(interaction: discord.Interaction):
-    await interaction.response.send_message("티켓", view=TicketView())
+async def ticket_panel(i):
+    await i.response.send_message("티켓", view=TicketView())
 
 # ================= RUN =================
 async def main():
