@@ -1,16 +1,19 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ui import View, Button, Modal, TextInput
-import datetime, os, sqlite3, asyncio
+import datetime
+import os
+import sqlite3
+import asyncio
 from flask import Flask
 from threading import Thread
 
 # ================= KEEP ALIVE =================
 app = Flask(__name__)
+
 @app.route("/")
 def home():
-    return "alive", 200
+    return "봇 살아있음", 200
 
 def keep_alive():
     Thread(target=lambda: app.run(host="0.0.0.0", port=10000), daemon=True).start()
@@ -21,32 +24,38 @@ cursor = conn.cursor()
 
 cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER)")
 cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
-cursor.execute("CREATE TABLE IF NOT EXISTS tickets (channel_id INTEGER, user_id INTEGER)")
 conn.commit()
 
-# ================= 설정 =================
+# ================= 환경 =================
 TOKEN = os.getenv("TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-
-WELCOME_CHANNEL_ID = 0
-LOG_CHANNEL_ID = 0
-TICKET_CATEGORY_ID = 0
-VERIFY_ROLE_ID = 0
+LOG_CHANNEL_ID = 1496478745538855146
+WELCOME_CHANNEL_ID = 1496478743873589448
+VERIFY_ROLE_ID = 1496479066075697234
+TICKET_CATEGORY_ID = 1496840441654677614
 
 # ================= 봇 =================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ================= 유틸 =================
-def embed(t, d="", c=0x5865F2):
-    e = discord.Embed(title=t, description=d, color=c)
+def embed(title, desc="", color=0x5865F2):
+    e = discord.Embed(title=title, description=desc, color=color)
     e.timestamp = datetime.datetime.utcnow()
     return e
 
+async def safe_send(channel, **kwargs):
+    try:
+        await channel.send(**kwargs)
+    except:
+        pass
+
 async def log(msg):
-    ch = bot.get_channel(LOG_CHANNEL_ID)
-    if ch:
-        await ch.send(embed=embed("📜 로그", msg))
+    try:
+        ch = bot.get_channel(LOG_CHANNEL_ID)
+        if ch:
+            await ch.send(embed=embed("📜 로그", msg))
+    except:
+        pass
 
 # ================= 경고 =================
 def get_warn(uid):
@@ -54,136 +63,169 @@ def get_warn(uid):
     r = cursor.fetchone()
     return r[0] if r else 0
 
-def set_warn(uid, count):
+def add_warn(uid):
+    count = get_warn(uid) + 1
     cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, count))
     conn.commit()
+    return count
 
-def add_warn(uid):
-    c = get_warn(uid)+1
-    set_warn(uid,c)
-    return c
+def remove_warn(uid):
+    count = max(get_warn(uid) - 1, 0)
+    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, count))
+    conn.commit()
+    return count
 
-async def auto_punish(m,c):
+async def auto_punish(member, count):
     try:
-        if c==1: await m.timeout(datetime.timedelta(minutes=10)); return "10분"
-        if c==2: await m.timeout(datetime.timedelta(hours=1)); return "1시간"
-        if c==3: await m.timeout(datetime.timedelta(days=1)); return "1일"
-        if c==4: await m.kick(); return "킥"
-        if c==5: await m.ban(); return "밴"
+        if count == 1:
+            await member.timeout(datetime.timedelta(minutes=10))
+            return "타임아웃 10분"
+        elif count == 2:
+            await member.timeout(datetime.timedelta(hours=1))
+            return "타임아웃 1시간"
+        elif count == 3:
+            await member.timeout(datetime.timedelta(days=1))
+            return "타임아웃 1일"
+        elif count == 4:
+            await member.kick()
+            return "킥"
+        elif count == 5:
+            await member.ban()
+            return "밴"
     except Exception as e:
-        return str(e)
+        return f"처벌 실패: {e}"
 
 # ================= 레벨 =================
-def get_level(uid):
-    cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
+def add_xp(uid):
+    cursor.execute("SELECT xp, level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
-    if not r:
-        cursor.execute("INSERT INTO levels VALUES(?,?,?)",(uid,0,1))
-        conn.commit()
-        return 0,1
-    return r
 
-def add_xp(uid,amount):
-    xp,lv = get_level(uid)
-    xp += amount
-    if xp >= lv*100:
-        xp = 0
-        lv += 1
-        leveled = True
+    if not r:
+        xp, level = 0, 1
     else:
-        leveled = False
-    cursor.execute("REPLACE INTO levels VALUES(?,?,?)",(uid,xp,lv))
+        xp, level = r
+
+    xp += 10
+    if xp >= level * 100:
+        level += 1
+        xp = 0
+
+    cursor.execute("REPLACE INTO levels VALUES(?,?,?)", (uid, xp, level))
     conn.commit()
-    return xp,lv,leveled
+    return level, xp
 
 # ================= 티켓 =================
-class CloseTicket(View):
+class CloseView(discord.ui.View):
     @discord.ui.button(label="🔒 닫기", style=discord.ButtonStyle.danger)
-    async def close(self,i,b):
-        await i.response.send_message("삭제중...")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("5초 후 삭제됨")
+        await log(f"티켓 종료: {interaction.channel.name}")
         await asyncio.sleep(5)
-        await i.channel.delete()
+        try:
+            await interaction.channel.delete()
+        except:
+            pass
 
-class TicketModal(Modal,title="티켓"):
-    title_input = TextInput(label="제목")
-    async def on_submit(self,i):
-        g=i.guild
-        c=g.get_channel(TICKET_CATEGORY_ID)
-        ch=await g.create_text_channel(name=f"ticket-{i.user.id}",category=c)
-        await ch.send(i.user.mention,view=CloseTicket())
-        await i.response.send_message(ch.mention,ephemeral=True)
+class TicketView(discord.ui.View):
+    @discord.ui.button(label="🎫 티켓", style=discord.ButtonStyle.primary)
+    async def ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        category = guild.get_channel(TICKET_CATEGORY_ID)
 
-class TicketView(View):
-    @discord.ui.button(label="티켓",style=discord.ButtonStyle.blurple)
-    async def t(self,i,b):
-        await i.response.send_modal(TicketModal())
+        ch = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.id}",
+            category=category
+        )
+
+        await ch.send(f"{interaction.user.mention} 티켓 생성", view=CloseView())
+        await interaction.response.send_message(f"생성됨: {ch.mention}", ephemeral=True)
 
 # ================= 인증 =================
-class Verify(View):
-    @discord.ui.button(label="인증",style=discord.ButtonStyle.green)
-    async def v(self,i,b):
-        role=i.guild.get_role(VERIFY_ROLE_ID)
-        await i.user.add_roles(role)
-        await i.response.send_message("완료",ephemeral=True)
+class VerifyView(discord.ui.View):
+    @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = interaction.guild.get_role(VERIFY_ROLE_ID)
+        try:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message("인증 완료", ephemeral=True)
+        except:
+            await interaction.response.send_message("실패", ephemeral=True)
 
 # ================= 명령어 =================
 @bot.tree.command(name="경고")
-async def warn(i,user:discord.Member,이유:str):
-    c=add_warn(user.id)
-    r=await auto_punish(user,c)
-    msg=f"{user.mention} {c}회\n{이유}"
-    if r: msg+=f"\n처벌:{r}"
-    await i.response.send_message(embed=embed("경고",msg))
+async def warn(interaction: discord.Interaction, user: discord.Member, 이유: str):
+    count = add_warn(user.id)
+    result = await auto_punish(user, count)
+
+    msg = f"{user.mention} 경고 {count}회\n이유: {이유}"
+    if result:
+        msg += f"\n처벌: {result}"
+
+    await interaction.response.send_message(embed=embed("⚠️ 경고", msg))
+    await log(msg)
 
 @bot.tree.command(name="경고취소")
-async def unwarn(i,user:discord.Member):
-    c=get_warn(user.id)
-    if c==0:
-        return await i.response.send_message("없음",ephemeral=True)
-    set_warn(user.id,c-1)
-    await i.response.send_message(embed=embed("취소",f"{c-1}회"))
+async def unwarn(interaction: discord.Interaction, user: discord.Member):
+    count = remove_warn(user.id)
+    await interaction.response.send_message(embed=embed("✅ 경고 감소", f"{user.mention} → {count}회"))
 
 @bot.tree.command(name="경고확인")
-async def check_warn(i,user:discord.Member):
-    c=get_warn(user.id)
-    await i.response.send_message(embed=embed("경고 확인",f"{user.mention}: {c}회"))
-
-@bot.command()
-async def 레벨(ctx):
-    xp,lv=get_level(ctx.author.id)
-    await ctx.send(embed=embed("레벨",f"Lv.{lv} | XP:{xp}/{lv*100}"))
+async def checkwarn(interaction: discord.Interaction, user: discord.Member):
+    count = get_warn(user.id)
+    await interaction.response.send_message(embed=embed("📊 경고", f"{user.mention} → {count}회"))
 
 @bot.tree.command(name="티켓패널")
-async def tp(i):
-    await i.response.send_message(view=TicketView())
+async def ticket_panel(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed("🎫 티켓"), view=TicketView())
 
 @bot.command()
 async def 인증패널(ctx):
-    await ctx.send(view=Verify())
+    await ctx.send(embed=embed("인증"), view=VerifyView())
 
 # ================= 이벤트 =================
 @bot.event
-async def on_member_join(m):
-    ch=bot.get_channel(WELCOME_CHANNEL_ID)
+async def on_member_join(member):
+    ch = bot.get_channel(WELCOME_CHANNEL_ID)
     if ch:
-        await ch.send(embed=embed("환영",m.mention))
+        await safe_send(ch, embed=embed("환영", f"{member.mention} 환영"))
 
 @bot.event
-async def on_message(m):
-    if m.author.bot: return
+async def on_message(message):
+    if message.author.bot:
+        return
 
-    # 레벨
-    xp,lv,up = add_xp(m.author.id,10)
-    if up:
-        await m.channel.send(f"🎉 {m.author.mention} 레벨업! Lv.{lv}")
+    level, xp = add_xp(message.author.id)
 
-    await bot.process_commands(m)
+    if xp == 0:
+        await safe_send(message.channel, content=f"{message.author.mention} 레벨업! {level}")
+
+    await bot.process_commands(message)
+
+# ================= 자동 재연결 =================
+@tasks.loop(seconds=30)
+async def auto_reconnect():
+    if not bot.is_closed():
+        return
+
+    try:
+        await bot.start(TOKEN)
+    except:
+        pass
 
 # ================= 실행 =================
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print("완료")
+    print("🔥 안정화 봇 실행 완료")
+    auto_reconnect.start()
+
+def run_bot():
+    while True:
+        try:
+            bot.run(TOKEN)
+        except Exception as e:
+            print("💥 봇 죽음 → 재시작", e)
+            asyncio.sleep(5)
 
 keep_alive()
-bot.run(TOKEN)
+run_bot()
