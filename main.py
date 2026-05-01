@@ -7,14 +7,13 @@ import asyncio
 import random
 from flask import Flask
 from threading import Thread
-from google import genai
-from google.genai import types
+from groq import AsyncGroq
 
 TOKEN = os.getenv("TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 WELCOME_CHANNEL_ID = 1496478743873589448
 TICKET_CATEGORY_ID = 1496840441654677614
@@ -587,6 +586,7 @@ async def on_ready():
 
     print(f"🔥 BOT READY: {bot.user}")
     print(f"✅ Slash commands synced: {len(synced)}")
+    print(f"🤖 Groq model: {GROQ_MODEL}")
 
 @bot.event
 async def on_member_join(member):
@@ -608,27 +608,35 @@ async def on_message(m):
 
 @bot.tree.command(name="ai", description="AI에게 질문합니다.")
 async def ai_chat(i: discord.Interaction, 질문: str):
-    if not GEMINI_API_KEY or gemini_client is None:
+    if not GROQ_API_KEY or groq_client is None:
         return await i.response.send_message(
-            "❌ GEMINI_API_KEY가 설정되지 않았습니다.",
+            "❌ GROQ_API_KEY가 설정되지 않았습니다.",
             ephemeral=True
         )
 
     await i.response.defer(thinking=True)
 
     try:
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model=GEMINI_MODEL,
-            contents=질문,
-            config=types.GenerateContentConfig(
-                system_instruction="너는 디스코드 서버에서 사용자를 도와주는 친절한 한국어 AI야. 답변은 너무 길지 않게 해.",
-                max_output_tokens=800,
-                temperature=0.7
-            )
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "너는 디스코드 서버에서 사용자를 도와주는 친절한 한국어 AI야. 답변은 너무 길지 않게 해."
+                },
+                {
+                    "role": "user",
+                    "content": 질문
+                }
+            ],
+            temperature=0.7,
+            max_tokens=800
         )
 
-        answer = response.text.strip() if response.text else "답변을 생성하지 못했습니다."
+        answer = response.choices[0].message.content.strip()
+
+        if not answer:
+            answer = "답변을 생성하지 못했습니다."
 
         if len(answer) > 1900:
             answer = answer[:1900] + "\n\n...답변이 너무 길어서 잘렸습니다."
@@ -636,6 +644,19 @@ async def ai_chat(i: discord.Interaction, 질문: str):
         await i.followup.send(answer)
 
     except Exception as e:
+        error_text = str(e)
+
+        if "429" in error_text or "rate_limit" in error_text.lower():
+            return await i.followup.send(
+                "❌ Groq 사용량 제한에 걸렸습니다.\n"
+                "잠시 후 다시 시도하거나 Groq 콘솔에서 한도를 확인하세요."
+            )
+
+        if "401" in error_text or "invalid_api_key" in error_text.lower():
+            return await i.followup.send(
+                "❌ GROQ_API_KEY가 잘못되었거나 Render 환경변수에 제대로 설정되지 않았습니다."
+            )
+
         await i.followup.send(f"❌ AI 오류 발생: `{e}`")
 
 @bot.tree.command(name="월급", description="월급 100,000원을 받습니다. 5초 쿨타임이 있습니다.")
