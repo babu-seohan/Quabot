@@ -1,22 +1,33 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
 import datetime
 import os
 import sqlite3
 import asyncio
-from flask import Flask, request, redirect, session, render_template_string
+from flask import Flask
 from threading import Thread
 
 # ================= 환경 =================
 TOKEN = os.getenv("TOKEN")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 LOG_CHANNEL_ID = 1496478745538855146
 WELCOME_CHANNEL_ID = 1496478743873589448
 VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
 STAFF_ROLE_ID = 1499592576712577138
+
+# ================= Flask (UptimeRobot 핵심) =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK - Bot Alive"
+
+def run_web():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+def keep_alive():
+    Thread(target=run_web, daemon=True).start()
 
 # ================= DB =================
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -26,100 +37,33 @@ cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY
 cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
 conn.commit()
 
-# ================= 봇 =================
+# ================= Bot =================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= 웹 =================
-app = Flask(__name__)
-app.secret_key = "secretkey"
-
-def is_logged_in():
-    return session.get("login")
-
-HTML = """
-<h1>🤖 봇 대시보드</h1>
-
-<form method="POST" action="/warn">
-<input name="user_id" placeholder="유저 ID">
-<input name="reason" placeholder="이유">
-<button>경고</button>
-</form>
-
-<h3>경고 목록</h3>
-{% for w in warnings %}
-<p>{{w[0]}} : {{w[1]}}</p>
-{% endfor %}
-
-<h3>레벨</h3>
-{% for l in levels %}
-<p>{{l[0]}} : LV {{l[2]}} (XP {{l[1]}})</p>
-{% endfor %}
-"""
-
-@app.route("/", methods=["GET","POST"])
-def login():
-    if request.method == "POST":
-        if request.form["pw"] == ADMIN_PASSWORD:
-            session["login"] = True
-            return redirect("/dash")
-    return "<form method='POST'><input name='pw'><button>로그인</button></form>"
-
-@app.route("/dash")
-def dash():
-    if not is_logged_in():
-        return redirect("/")
-    cursor.execute("SELECT * FROM warnings")
-    w = cursor.fetchall()
-    cursor.execute("SELECT * FROM levels")
-    l = cursor.fetchall()
-    return render_template_string(HTML, warnings=w, levels=l)
-
-@app.route("/warn", methods=["POST"])
-def web_warn():
-    if not is_logged_in():
-        return redirect("/")
-
-    uid = int(request.form["user_id"])
-    reason = request.form["reason"]
-
-    count = add_warn(uid)
-
-    async def punish():
-        for g in bot.guilds:
-            m = g.get_member(uid)
-            if m:
-                await auto_punish(m, count)
-                await log(f"[웹] {m} 경고 {count} | {reason}")
-                break
-
-    # 🔥 안전 실행 (loop 안전 처리)
-    bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(punish()))
-
-    return redirect("/dash")
-
-def run_web():
-    app.run(host="0.0.0.0", port=10000)
-
-def keep_alive():
-    Thread(target=run_web, daemon=True).start()
-
-# ================= 유틸 =================
-def embed(t, d="", c=0x5865F2):
-    e = discord.Embed(title=t, description=d, color=c)
+# ================= Utils =================
+def embed(title, desc="", color=0x5865F2):
+    e = discord.Embed(title=title, description=desc, color=color)
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-async def safe_send(ch, **k):
+async def safe_send(ch, **kwargs):
     try:
-        await ch.send(**k)
+        await ch.send(**kwargs)
     except:
         pass
 
 async def log(msg):
-    ch = bot.get_channel(LOG_CHANNEL_ID)
-    if ch:
-        await safe_send(ch, embed=embed("📜 로그", msg))
+    try:
+        ch = bot.get_channel(LOG_CHANNEL_ID)
+        if ch:
+            await ch.send(embed=embed("📜 로그", msg))
+    except:
+        pass
+
+# ================= 권한 =================
+def is_staff(member):
+    return any(r.id == STAFF_ROLE_ID for r in member.roles)
 
 # ================= 경고 =================
 def get_warn(uid):
@@ -129,127 +73,119 @@ def get_warn(uid):
 
 def add_warn(uid):
     c = get_warn(uid) + 1
-    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid,c))
+    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
     conn.commit()
     return c
 
 def remove_warn(uid):
-    c = max(get_warn(uid)-1,0)
-    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid,c))
+    c = max(get_warn(uid)-1, 0)
+    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
     conn.commit()
     return c
 
-async def auto_punish(m, c):
+async def auto_punish(member, c):
     try:
-        if c==1:
-            await m.timeout(datetime.timedelta(minutes=10))
-        elif c==2:
-            await m.timeout(datetime.timedelta(hours=1))
-        elif c==3:
-            await m.timeout(datetime.timedelta(days=1))
-        elif c==4:
-            await m.kick()
-        elif c>=5:
-            await m.ban()
-    except:
-        pass
+        if c == 1:
+            await member.timeout(datetime.timedelta(minutes=10))
+        elif c == 2:
+            await member.timeout(datetime.timedelta(hours=1))
+        elif c == 3:
+            await member.timeout(datetime.timedelta(days=1))
+        elif c == 4:
+            await member.kick()
+        elif c >= 5:
+            await member.ban()
+    except Exception as e:
+        print("PUNISH ERROR:", e)
 
 # ================= 레벨 =================
 def add_xp(uid):
     cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
-    xp,lv = (r if r else (0,1))
+    xp, lv = r if r else (0, 1)
+
     xp += 10
-    if xp >= lv*100:
+
+    if xp >= lv * 100:
         lv += 1
         xp = 0
-    cursor.execute("REPLACE INTO levels VALUES(?,?,?)",(uid,xp,lv))
+
+    cursor.execute("REPLACE INTO levels VALUES(?,?,?)", (uid, xp, lv))
     conn.commit()
-    return lv,xp
+    return lv, xp
 
 # ================= 티켓 =================
 class CloseView(discord.ui.View):
-    @discord.ui.button(label="닫기",style=discord.ButtonStyle.danger)
-    async def close(self,i,b):
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
+    async def close(self, i, b):
         await i.response.send_message("삭제됨")
         await asyncio.sleep(3)
         await i.channel.delete()
 
 class TicketView(discord.ui.View):
-    @discord.ui.button(label="티켓",style=discord.ButtonStyle.primary)
-    async def t(self,i,b):
-        c=i.guild.get_channel(TICKET_CATEGORY_ID)
-        ch=await i.guild.create_text_channel(name=f"ticket-{i.user.id}",category=c)
-        await ch.send(i.user.mention,view=CloseView())
-        await i.response.send_message("생성됨",ephemeral=True)
+    @discord.ui.button(label="티켓", style=discord.ButtonStyle.primary)
+    async def create(self, i, b):
+        cat = i.guild.get_channel(TICKET_CATEGORY_ID)
+        ch = await i.guild.create_text_channel(name=f"ticket-{i.user.id}", category=cat)
+        await ch.send(i.user.mention, view=CloseView())
+        await i.response.send_message("생성됨", ephemeral=True)
 
 # ================= 인증 =================
-def is_staff_member(member):
-    return any(role.id == STAFF_ROLE_ID for role in member.roles)
+class VerifyView(discord.ui.View):
+    @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
+    async def verify(self, i, b):
+        role = i.guild.get_role(VERIFY_ROLE_ID)
+        await i.user.add_roles(role)
+        await i.response.send_message("완료", ephemeral=True)
 
+# ================= 명령어 =================
 @bot.command()
 async def 인증패널(ctx):
-
-    if not is_staff_member(ctx.author):
+    if not is_staff(ctx.author):
         await ctx.reply("❌ 운영진만 사용 가능")
         return
 
-    await ctx.send(
-        embed=embed("인증"),
-        view=VerifyView()
-    )
-
-# ================= 명령어 =================
-def is_staff(interaction):
-    return any(r.id == STAFF_ROLE_ID for r in interaction.user.roles)
+    await ctx.send(embed=embed("인증"), view=VerifyView())
 
 @bot.tree.command(name="경고")
-@app_commands.check(is_staff)
-async def warn(i,u:discord.Member,이유:str):
-    c=add_warn(u.id)
-    await auto_punish(u,c)
-    await i.response.send_message(embed=embed("경고",f"{u.mention} {c}회"))
+async def warn(i, u: discord.Member, 이유: str):
+    if not is_staff(i.user):
+        await i.response.send_message("❌ 권한 없음", ephemeral=True)
+        return
 
-@bot.tree.command(name="경고취소")
-@app_commands.check(is_staff)
-async def unwarn(i,u:discord.Member):
-    c=remove_warn(u.id)
-    await i.response.send_message(embed=embed("감소",f"{u.mention} {c}회"))
-
-@bot.tree.command(name="경고확인")
-@app_commands.check(is_staff)
-async def check(i,u:discord.Member):
-    c=get_warn(u.id)
-    await i.response.send_message(embed=embed("확인",f"{u.mention} {c}회"))
-
-@bot.tree.command(name="티켓패널")
-@app_commands.check(is_staff)
-async def ticket(i):
-    await i.response.send_message(embed=embed("티켓"),view=TicketView())
+    c = add_warn(u.id)
+    await auto_punish(u, c)
+    await i.response.send_message(embed=embed("경고", f"{u.mention} {c}회"))
 
 # ================= 이벤트 =================
 @bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print("🔥 BOT READY")
+
+@bot.event
 async def on_message(m):
-    if m.author.bot: return
-    lv,xp=add_xp(m.author.id)
-    if xp==0:
-        await safe_send(m.channel,content=f"{m.author.mention} 레벨업 {lv}")
+    if m.author.bot:
+        return
+
+    try:
+        lv, xp = add_xp(m.author.id)
+        if xp == 0:
+            await m.channel.send(f"{m.author.mention} 레벨업 {lv}")
+    except Exception as e:
+        print("XP ERROR:", e)
+
     await bot.process_commands(m)
 
 @bot.event
 async def on_member_join(m):
-    ch=bot.get_channel(WELCOME_CHANNEL_ID)
+    ch = bot.get_channel(WELCOME_CHANNEL_ID)
     if ch:
-        await safe_send(ch,embed=embed("환영",m.mention))
-
-@bot.event
-async def on_ready():
-    await bot.tree.sync()
-    print("🔥 봇 실행 완료")
+        await safe_send(ch, embed=embed("환영", m.mention))
 
 # ================= 실행 =================
-async def start():
+async def main():
     keep_alive()
     await bot.start(TOKEN)
 
-asyncio.run(start())
+asyncio.run(main())
