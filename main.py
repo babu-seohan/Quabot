@@ -1,9 +1,11 @@
+from openai import OpenAI
 import discord
 from discord.ext import commands
 from discord import app_commands
 from discord.ui import View, Button, Modal, TextInput
 import datetime
 import os
+import random
 from flask import Flask
 from threading import Thread
 
@@ -37,7 +39,7 @@ def make_embed(title: str, description: str = "", color: int = Color.PRIMARY,
         embed.set_thumbnail(url=thumbnail)
     return embed
 
-# ====================== 슬립 방지 ======================
+# ====================== 슬립 방지 (Keep Alive) ======================
 _flask_app = Flask(__name__)
 
 @_flask_app.route("/")
@@ -59,42 +61,67 @@ async def send_log(embed: discord.Embed):
     if ch:
         await ch.send(embed=embed)
 
-# ====================== 인증 시스템 ======================
+# ====================== 인증 시스템 (규칙 동의) ======================
+class VerifyModal(Modal, title="📜 서버 규칙 동의"):
+    agreement = TextInput(
+        label="아래 규칙을 읽고 동의합니다를 입력하세요",
+        placeholder="동의합니다",
+        required=True,
+        max_length=10
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.agreement.value.strip() != "동의합니다":
+            return await interaction.response.send_message("❌ '동의합니다'라고 정확히 입력해주세요.", ephemeral=True)
+
+        role = interaction.guild.get_role(VERIFY_ROLE_ID)
+        if role in interaction.user.roles:
+            return await interaction.response.send_message("✅ 이미 인증된 유저입니다.", ephemeral=True)
+
+        await interaction.user.add_roles(role)
+
+        success_embed = make_embed(
+            title="✅ 인증 완료",
+            description=f"{interaction.user.mention} 님, 서버에 오신 것을 환영합니다!",
+            color=Color.SUCCESS,
+            footer=f"인증 시각: {now_str()}",
+            thumbnail=interaction.user.display_avatar.url
+        )
+        await interaction.response.send_message(embed=success_embed, ephemeral=True)
+
+        log_embed = make_embed(
+            title="🔐 인증 완료",
+            description=f"{interaction.user.mention} 님이 인증을 완료했습니다.",
+            color=Color.SUCCESS
+        )
+        log_embed.add_field(name="유저", value=f"{interaction.user} ({interaction.user.id})", inline=False)
+        log_embed.add_field(name="인증 방법", value="버튼 + 규칙 동의", inline=False)
+        log_embed.add_field(name="시각", value=now_str(), inline=False)
+        await send_log(log_embed)
+
+
 class VerifyView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="✅ 인증하기", style=discord.ButtonStyle.success, custom_id="verify_btn")
     async def verify(self, interaction: discord.Interaction, button: Button):
-        role = interaction.guild.get_role(VERIFY_ROLE_ID)
-        if role in interaction.user.roles:
-            return await interaction.response.send_message("이미 인증된 유저예요!", ephemeral=True)
+        await interaction.response.send_modal(VerifyModal())
 
-        if role:
-            await interaction.user.add_roles(role)
-
-        embed = make_embed(
-            "✅ 인증 완료",
-            f"{interaction.user.mention} 님, 서버 이용을 환영합니다!",
-            Color.SUCCESS,
-            f"인증 시각: {now_str()}",
-            interaction.user.display_avatar.url
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        log = make_embed("🔐 인증 로그", f"{interaction.user.mention} 인증 완료", Color.INFO)
-        log.add_field(name="유저 ID", value=str(interaction.user.id))
-        log.add_field(name="시각", value=now_str())
-        await send_log(log)
 
 @bot.command(name="인증패널")
 @commands.has_permissions(administrator=True)
 async def verify_panel(ctx):
     embed = make_embed(
-        "🔐 서버 인증",
-        "아래 버튼을 눌러 인증을 완료하세요.\n인증 후 서버의 모든 채널에 접근 가능합니다.",
-        Color.PRIMARY,
-        "버튼을 한 번만 클릭하세요"
+        title="🔐 서버 인증",
+        description=(
+            "**서버 이용을 위한 인증이 필요합니다.**\n\n"
+            "1. 아래 버튼을 클릭하세요\n"
+            "2. 규칙을 확인 후 **동의합니다** 입력\n"
+            "3. 인증이 완료되면 모든 채널이 공개됩니다."
+        ),
+        color=Color.PRIMARY,
+        footer="인증은 1회만 진행됩니다"
     )
     await ctx.send(embed=embed, view=VerifyView())
     await ctx.message.delete()
@@ -173,6 +200,7 @@ class CloseView(View):
         await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=5))
         await interaction.channel.delete()
 
+
 @bot.tree.command(name="티켓패널", description="티켓 생성 패널을 전송합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_panel(interaction: discord.Interaction):
@@ -201,6 +229,7 @@ async def on_member_join(member: discord.Member):
     embed.add_field(name="계정 생성일", value=member.created_at.strftime("%Y-%m-%d"))
     embed.add_field(name="입장일", value=now_str())
     await ch.send(embed=embed)
+
 
 @bot.event
 async def on_member_remove(member: discord.Member):
@@ -248,7 +277,7 @@ async def warn(interaction: discord.Interaction, user: discord.Member, 이유: s
     await interaction.response.send_message(embed=embed)
     await send_log(make_embed("⚠️ 경고 로그", f"{user.mention} | 누적 {count}회 | 이유: {이유}{punishment_msg}", Color.WARNING))
 
-# ====================== 기타 관리 명령어 ======================
+# ====================== 관리 명령어 ======================
 @bot.tree.command(name="경고취소", description="유저 경고를 1회 감소시킵니다")
 @app_commands.checks.has_permissions(kick_members=True)
 async def unwarn(interaction: discord.Interaction, user: discord.Member):
@@ -348,7 +377,50 @@ async def on_app_command_error(interaction: discord.Interaction, error):
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(embed=embed, ephemeral=True)
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
 
+    if message.content.startswith("!ai"):
+        user_id = message.author.id
+        user_input = message.content[3:].strip()
+
+        if not user_input:
+            return await message.channel.send("💬 질문을 입력해줘!")
+
+        if user_id not in user_memory:
+            user_memory[user_id] = [
+                {"role": "system", "content": "너는 디스코드에서 친근하게 대화하는 AI야."}
+            ]
+
+        user_memory[user_id].append({"role": "user", "content": user_input})
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=user_memory[user_id]
+            )
+
+            reply = response.choices[0].message.content
+            user_memory[user_id].append({"role": "assistant", "content": reply})
+
+            if len(user_memory[user_id]) > 20:
+                user_memory[user_id] = user_memory[user_id][-20:]
+
+            embed = make_embed(
+                "🤖 AI 답변",
+                reply[:4000],
+                Color.INFO,
+                f"요청자: {message.author}"
+            )
+
+            await message.channel.send(embed=embed)
+
+        except Exception as e:
+            await message.channel.send(f"❌ 오류: {e}")
+
+    await bot.process_commands(message)
 # ====================== 봇 시작 ======================
 @bot.event
 async def on_ready():
@@ -359,5 +431,8 @@ async def on_ready():
     )
     print(f"✅ 봇 로그인: {bot.user} | 서버 수: {len(bot.guilds)}개")
 
+# ====================== 실행 ======================
 keep_alive()
 bot.run(TOKEN)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+user_memory = {}
