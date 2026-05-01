@@ -184,12 +184,20 @@ class TicketView(discord.ui.View):
         await i.response.send_message("생성됨",ephemeral=True)
 
 # ================= 인증 =================
-class VerifyView(discord.ui.View):
-    @discord.ui.button(label="인증",style=discord.ButtonStyle.success)
-    async def v(self,i,b):
-        r=i.guild.get_role(VERIFY_ROLE_ID)
-        await i.user.add_roles(r)
-        await i.response.send_message("완료",ephemeral=True)
+def is_staff_member(member):
+    return any(role.id == STAFF_ROLE_ID for role in member.roles)
+
+@bot.command()
+async def 인증패널(ctx):
+
+    if not is_staff_member(ctx.author):
+        await ctx.reply("❌ 운영진만 사용 가능")
+        return
+
+    await ctx.send(
+        embed=embed("인증"),
+        view=VerifyView()
+    )
 
 # ================= 명령어 =================
 def is_staff(interaction):
