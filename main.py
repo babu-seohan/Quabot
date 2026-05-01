@@ -16,7 +16,7 @@ VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
 STAFF_ROLE_ID = 1499592576712577138
 
-# ================= Flask (UptimeRobot 핵심) =================
+# ================= Flask (UptimeRobot 유지용) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -33,9 +33,10 @@ def keep_alive():
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER)")
-cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
-conn.commit()
+def init_db():
+    cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
+    conn.commit()
 
 # ================= Bot =================
 intents = discord.Intents.all()
@@ -47,17 +48,9 @@ def embed(title, desc="", color=0x5865F2):
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-async def safe_send(ch, **kwargs):
+async def safe_send(channel, **kwargs):
     try:
-        await ch.send(**kwargs)
-    except:
-        pass
-
-async def log(msg):
-    try:
-        ch = bot.get_channel(LOG_CHANNEL_ID)
-        if ch:
-            await ch.send(embed=embed("📜 로그", msg))
+        await channel.send(**kwargs)
     except:
         pass
 
@@ -95,8 +88,8 @@ async def auto_punish(member, c):
             await member.kick()
         elif c >= 5:
             await member.ban()
-    except Exception as e:
-        print("PUNISH ERROR:", e)
+    except:
+        pass
 
 # ================= 레벨 =================
 def add_xp(uid):
@@ -119,16 +112,16 @@ class CloseView(discord.ui.View):
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
     async def close(self, i, b):
         await i.response.send_message("삭제됨")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         await i.channel.delete()
 
 class TicketView(discord.ui.View):
-    @discord.ui.button(label="티켓", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="티켓 생성", style=discord.ButtonStyle.primary)
     async def create(self, i, b):
         cat = i.guild.get_channel(TICKET_CATEGORY_ID)
         ch = await i.guild.create_text_channel(name=f"ticket-{i.user.id}", category=cat)
         await ch.send(i.user.mention, view=CloseView())
-        await i.response.send_message("생성됨", ephemeral=True)
+        await i.response.send_message("생성 완료", ephemeral=True)
 
 # ================= 인증 =================
 class VerifyView(discord.ui.View):
@@ -136,32 +129,20 @@ class VerifyView(discord.ui.View):
     async def verify(self, i, b):
         role = i.guild.get_role(VERIFY_ROLE_ID)
         await i.user.add_roles(role)
-        await i.response.send_message("완료", ephemeral=True)
-
-# ================= 명령어 =================
-@bot.command()
-async def 인증패널(ctx):
-    if not is_staff(ctx.author):
-        await ctx.reply("❌ 운영진만 사용 가능")
-        return
-
-    await ctx.send(embed=embed("인증"), view=VerifyView())
-
-@bot.tree.command(name="경고")
-async def warn(i, u: discord.Member, 이유: str):
-    if not is_staff(i.user):
-        await i.response.send_message("❌ 권한 없음", ephemeral=True)
-        return
-
-    c = add_warn(u.id)
-    await auto_punish(u, c)
-    await i.response.send_message(embed=embed("경고", f"{u.mention} {c}회"))
+        await i.response.send_message("인증 완료", ephemeral=True)
 
 # ================= 이벤트 =================
 @bot.event
 async def on_ready():
+    init_db()
     await bot.tree.sync()
-    print("🔥 BOT READY")
+    print("🔥 BOT READY (SERVICE MODE)")
+
+@bot.event
+async def on_member_join(m):
+    ch = bot.get_channel(WELCOME_CHANNEL_ID)
+    if ch:
+        await safe_send(ch, embed=embed("환영", m.mention))
 
 @bot.event
 async def on_message(m):
@@ -172,18 +153,47 @@ async def on_message(m):
         lv, xp = add_xp(m.author.id)
         if xp == 0:
             await m.channel.send(f"{m.author.mention} 레벨업 {lv}")
-    except Exception as e:
-        print("XP ERROR:", e)
+    except:
+        pass
 
     await bot.process_commands(m)
 
-@bot.event
-async def on_member_join(m):
-    ch = bot.get_channel(WELCOME_CHANNEL_ID)
-    if ch:
-        await safe_send(ch, embed=embed("환영", m.mention))
+# ================= 명령어 =================
+@bot.command()
+async def 인증패널(ctx):
+    if not is_staff(ctx.author):
+        return await ctx.reply("❌ 권한 없음")
 
-# ================= 실행 =================
+    await ctx.send(embed=embed("인증"), view=VerifyView())
+
+@bot.command()
+async def 티켓패널(ctx):
+    await ctx.send(embed=embed("티켓"), view=TicketView())
+
+@bot.command()
+async def 경고(ctx, user: discord.Member, 이유="없음"):
+    if not is_staff(ctx.author):
+        return await ctx.reply("❌ 권한 없음")
+
+    c = add_warn(user.id)
+    await auto_punish(user, c)
+
+    await ctx.send(embed=embed("경고", f"{user.mention} {c}회 | {이유}"))
+
+@bot.command()
+async def 경고취소(ctx, user: discord.Member):
+    if not is_staff(ctx.author):
+        return await ctx.reply("❌ 권한 없음")
+
+    c = remove_warn(user.id)
+    await ctx.send(embed=embed("경고 감소", f"{user.mention} {c}회"))
+
+@bot.command()
+async def 경고확인(ctx, user: discord.Member):
+    c = get_warn(user.id)
+    await ctx.send(embed=embed("경고 확인", f"{user.mention} {c}회"))
+
+# ================= RUN =================
 async def main():
     keep_alive()
     await bot.start(TOKEN)
