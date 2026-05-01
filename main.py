@@ -15,6 +15,8 @@ WELCOME_CHANNEL_ID = 1496478743873589448
 TICKET_CATEGORY_ID = 1496840441654677614
 VERIFY_ROLE_ID = 1499675598178750560
 
+PARTY_CATEGORY_NAME = "🎮 파티"
+
 # ================= KEEP ALIVE =================
 app = Flask(__name__)
 
@@ -55,6 +57,15 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS parties (
+        guild_id INTEGER,
+        owner_id INTEGER,
+        voice_id INTEGER,
+        max_size INTEGER
+    )
+    """)
+
     conn.commit()
 
 # ================= BOT =================
@@ -67,7 +78,7 @@ def embed(title, desc="", color=0x5865F2):
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-# ================= ROLE SYSTEM =================
+# ================= ADMIN ROLE SYSTEM =================
 def get_admin_role(guild_id):
     cursor.execute("SELECT admin_role_id FROM guild_config WHERE guild_id=?", (guild_id,))
     r = cursor.fetchone()
@@ -80,7 +91,7 @@ def is_admin(member: discord.Member):
     role_id = get_admin_role(member.guild.id)
     return role_id and any(r.id == role_id for r in member.roles)
 
-# ================= ROLE SET COMMAND =================
+# ================= ROLE SET =================
 @bot.tree.command(name="역할")
 async def set_role(interaction: discord.Interaction, role: discord.Role):
 
@@ -92,7 +103,7 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
 
     await interaction.response.send_message(embed=embed("설정 완료", f"관리자 역할: {role.mention}"))
 
-# ================= WARNING SYSTEM =================
+# ================= WARNING =================
 def get_warn(uid):
     cursor.execute("SELECT count FROM warnings WHERE user_id=?", (uid,))
     r = cursor.fetchone()
@@ -115,7 +126,6 @@ def remove_warn(uid):
 def clear_warn(uid):
     set_warn(uid, 0)
 
-# ================= PUNISH SYSTEM =================
 async def auto_punish(member: discord.Member, count: int):
     try:
         if count == 1:
@@ -137,7 +147,7 @@ async def remove_punish(member: discord.Member):
     except:
         pass
 
-# ================= LEVEL SYSTEM =================
+# ================= LEVEL =================
 def add_xp(uid):
     cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
@@ -168,18 +178,16 @@ class VerifyView(discord.ui.View):
 
         await i.user.add_roles(role)
 
-        try:
-            await i.user.send(embed=embed("인증 완료", "서버 이용 가능"))
-        except:
-            pass
-
-        await i.response.send_message("인증 완료", ephemeral=True)
+        await i.response.send_message(
+            embed=embed("인증 완료", "서버 이용 가능"),
+            ephemeral=True
+        )
 
 # ================= TICKET =================
 class CloseView(discord.ui.View):
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
     async def close(self, i, b):
-        await i.response.send_message("삭제 중...")
+        await i.response.send_message(embed=embed("삭제", "채널 삭제 중..."))
         await asyncio.sleep(2)
         await i.channel.delete()
 
@@ -187,7 +195,7 @@ class TicketView(discord.ui.View):
     @discord.ui.button(label="티켓 생성", style=discord.ButtonStyle.primary)
     async def create(self, i, b):
 
-        cat = i.guild.get_channel(TICKET_CATEGORY_ID)
+        cat = discord.utils.get(i.guild.categories, id=TICKET_CATEGORY_ID)
 
         ch = await i.guild.create_text_channel(
             name=f"ticket-{i.user.id}",
@@ -196,17 +204,57 @@ class TicketView(discord.ui.View):
 
         await ch.send(i.user.mention, view=CloseView())
 
-        await i.response.send_message(
-            embed=embed("티켓 생성", "채널이 생성되었습니다"),
+        await i.response.send_message(embed=embed("티켓", "생성 완료"), ephemeral=True)
+
+# ================= PARTY SYSTEM =================
+class PartyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def create_party(self, interaction, size):
+        guild = interaction.guild
+
+        cat = discord.utils.get(guild.categories, name=PARTY_CATEGORY_NAME)
+        if not cat:
+            cat = await guild.create_category(PARTY_CATEGORY_NAME)
+
+        vc = await guild.create_voice_channel(
+            name=f"파티-{interaction.user.display_name}-{size}인",
+            category=cat
+        )
+
+        cursor.execute(
+            "INSERT INTO parties VALUES(?,?,?,?)",
+            (guild.id, interaction.user.id, vc.id, size)
+        )
+        conn.commit()
+
+        await interaction.response.send_message(
+            embed=embed("파티 생성", f"{size}인 파티 생성 완료 🎮"),
             ephemeral=True
         )
+
+    @discord.ui.button(label="솔로", style=discord.ButtonStyle.primary)
+    async def solo(self, i, b): await self.create_party(i, 1)
+
+    @discord.ui.button(label="듀오", style=discord.ButtonStyle.primary)
+    async def duo(self, i, b): await self.create_party(i, 2)
+
+    @discord.ui.button(label="트리오", style=discord.ButtonStyle.primary)
+    async def trio(self, i, b): await self.create_party(i, 3)
+
+    @discord.ui.button(label="스쿼드", style=discord.ButtonStyle.primary)
+    async def squad(self, i, b): await self.create_party(i, 4)
+
+    @discord.ui.button(label="5인", style=discord.ButtonStyle.primary)
+    async def five(self, i, b): await self.create_party(i, 5)
 
 # ================= EVENTS =================
 @bot.event
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 FINAL BOT READY")
+    print("🔥 ULTIMATE BOT READY")
 
 @bot.event
 async def on_member_join(member):
@@ -234,21 +282,17 @@ async def on_message(m):
 # ================= SLASH COMMANDS =================
 
 @bot.tree.command(name="경고")
-async def warn(i: discord.Interaction, user: discord.Member, reason: str = "없음"):
-
+async def warn(i, user: discord.Member, reason: str = "없음"):
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = add_warn(user.id)
     await auto_punish(user, c)
 
-    await i.response.send_message(
-        embed=embed("경고 추가", f"{user.mention}\n{reason}\n누적: {c}")
-    )
+    await i.response.send_message(embed=embed("경고", f"{user.mention}\n{reason}\n누적: {c}"))
 
 @bot.tree.command(name="경고감소")
 async def warn_minus(i, user: discord.Member):
-
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
@@ -259,31 +303,25 @@ async def warn_minus(i, user: discord.Member):
 
 @bot.tree.command(name="경고삭제")
 async def warn_clear(i, user: discord.Member):
-
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     clear_warn(user.id)
     await remove_punish(user)
 
-    await i.response.send_message(
-        embed=embed("초기화", f"{user.mention} 경고 + 처벌 해제")
-    )
-
-@bot.tree.command(name="경고확인")
-async def warn_check(i, user: discord.Member):
-
-    await i.response.send_message(
-        embed=embed("경고 확인", f"{user.mention} → {get_warn(user.id)}회")
-    )
+    await i.response.send_message(embed=embed("초기화", "경고 + 처벌 해제"))
 
 @bot.tree.command(name="인증패널")
 async def verify_panel(i):
-    await i.response.send_message("인증", view=VerifyView())
+    await i.response.send_message(embed=embed("인증 패널"), view=VerifyView())
 
 @bot.tree.command(name="티켓패널")
 async def ticket_panel(i):
-    await i.response.send_message("티켓", view=TicketView())
+    await i.response.send_message(embed=embed("티켓 패널"), view=TicketView())
+
+@bot.tree.command(name="파티패널")
+async def party_panel(i):
+    await i.response.send_message(embed=embed("파티 시스템 🎮"), view=PartyView())
 
 # ================= RUN =================
 async def main():
