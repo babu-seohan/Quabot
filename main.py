@@ -279,6 +279,8 @@ async def on_ready():
 await bot.tree.sync()
 print("🔥 끝판왕 봇 실행 완료")
 
-
-bot.run(TOKEN)
+try:
+    bot.run(TOKEN)
+except Exception as e:
+    print("🔥 실행 오류:", e)
 
