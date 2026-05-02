@@ -40,6 +40,13 @@ def init_db():
         welcome_ch  INTEGER,
         log_ch      INTEGER
     )""")
+    # sticky: 채널별로 고정 메시지 내용과 마지막 전송된 메시지 ID를 저장
+    cur.execute("""CREATE TABLE IF NOT EXISTS sticky (
+        channel_id  INTEGER PRIMARY KEY,
+        guild_id    INTEGER,
+        content     TEXT,
+        message_id  INTEGER
+    )""")
     conn.commit()
 
 # ================== EMBED HELPERS ==================
@@ -61,6 +68,18 @@ def info_embed(t, d=""):
 
 def warn_embed(t, d=""):
     return _base_embed(f"⚠️  {t}", d, 0xFEE75C, "경고")
+
+# ================== PERMISSION HELPER ==================
+def has_admin_role(interaction: discord.Interaction) -> bool:
+    """서버 관리자이거나 봇 관리자 역할을 가진 경우 True 반환"""
+    if interaction.user.guild_permissions.administrator:
+        return True
+    cfg = get_guild_config(interaction.guild.id)
+    if cfg["admin_role"]:
+        role = interaction.guild.get_role(cfg["admin_role"])
+        if role and role in interaction.user.roles:
+            return True
+    return False
 
 # ================== GUILD CONFIG HELPERS ==================
 def get_guild_config(guild_id):
@@ -121,6 +140,25 @@ def clear_warn(uid):
     cur.execute("REPLACE INTO warn VALUES (?,0)", (uid,))
     conn.commit()
 
+# ================== STICKY HELPERS ==================
+def get_sticky(channel_id):
+    cur.execute("SELECT content, message_id FROM sticky WHERE channel_id=?", (channel_id,))
+    r = cur.fetchone()
+    return r if r else None
+
+def set_sticky(channel_id, guild_id, content, message_id):
+    cur.execute("""INSERT INTO sticky (channel_id, guild_id, content, message_id)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(channel_id) DO UPDATE SET
+                   content=excluded.content,
+                   message_id=excluded.message_id""",
+                (channel_id, guild_id, content, message_id))
+    conn.commit()
+
+def delete_sticky(channel_id):
+    cur.execute("DELETE FROM sticky WHERE channel_id=?", (channel_id,))
+    conn.commit()
+
 # ================== VERIFY VIEW ==================
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -128,7 +166,6 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="인증하기", emoji="✅", style=discord.ButtonStyle.success, custom_id="verify_btn")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 역할 생성 가능성 있으므로 defer 먼저
         await interaction.response.defer(ephemeral=True)
 
         cfg = get_guild_config(interaction.guild.id)
@@ -155,7 +192,6 @@ class VerifyView(discord.ui.View):
 
         await interaction.user.add_roles(role, reason="인증 버튼 클릭")
 
-        # DM 발송
         try:
             dm_embed = discord.Embed(
                 title="✅  인증 완료",
@@ -192,7 +228,6 @@ class TicketView(discord.ui.View):
 
     @discord.ui.button(label="티켓 생성", emoji="🎟️", style=discord.ButtonStyle.primary, custom_id="ticket_btn")
     async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 채널 생성 전에 defer
         await interaction.response.defer(ephemeral=True)
 
         existing = discord.utils.get(
@@ -255,9 +290,9 @@ class TicketCloseView(discord.ui.View):
 
     @discord.ui.button(label="티켓 닫기", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ticket_close_btn")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_channels:
+        if not has_admin_role(interaction):
             await interaction.response.send_message(
-                embed=error_embed("권한 없음", "채널 관리 권한이 필요합니다."),
+                embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."),
                 ephemeral=True
             )
             return
@@ -325,8 +360,8 @@ class AdminPanel(discord.ui.View):
 # ================== PANEL COMMANDS ==================
 @bot.tree.command(name="인증패널", description="인증 패널을 전송합니다.")
 async def verify_panel(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     e = discord.Embed(
         title="✅  서버 인증",
@@ -344,8 +379,8 @@ async def verify_panel(interaction: discord.Interaction):
 
 @bot.tree.command(name="티켓패널", description="티켓 패널을 전송합니다.")
 async def ticket_panel(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     e = discord.Embed(
         title="🎟️  티켓 시스템",
@@ -363,8 +398,8 @@ async def ticket_panel(interaction: discord.Interaction):
 
 @bot.tree.command(name="관리자패널", description="관리자 패널을 전송합니다.")
 async def admin_panel(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     e = discord.Embed(
         title="⚙️  관리자 패널",
@@ -380,7 +415,7 @@ async def admin_panel(interaction: discord.Interaction):
 @bot.tree.command(name="역할", description="인증 역할 및 봇 관리자 역할을 설정합니다.")
 async def set_roles(interaction: discord.Interaction, 인증역할: discord.Role, 관리자역할: discord.Role):
     if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "서버 관리자만 역할을 설정할 수 있습니다."), ephemeral=True)
 
     set_guild_config(interaction.guild.id, verify_role=인증역할.id, admin_role=관리자역할.id)
 
@@ -394,8 +429,8 @@ async def set_roles(interaction: discord.Interaction, 인증역할: discord.Role
 # ================== 채널 설정 ==================
 @bot.tree.command(name="채널설정", description="입장(웰컴) 채널과 로그 채널을 지정합니다.")
 async def set_channels(interaction: discord.Interaction, 입장채널: discord.TextChannel, 로그채널: discord.TextChannel):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     set_guild_config(interaction.guild.id, welcome_ch=입장채널.id, log_ch=로그채널.id)
 
@@ -406,10 +441,151 @@ async def set_channels(interaction: discord.Interaction, 입장채널: discord.T
     await interaction.response.send_message(embed=e)
 
 
+# ================== 청소 명령어 ==================
+@bot.tree.command(name="청소", description="채널의 메시지를 일괄 삭제합니다. (최대 100개)")
+async def purge(interaction: discord.Interaction, 개수: int):
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(
+            embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."),
+            ephemeral=True
+        )
+    if 개수 < 1 or 개수 > 100:
+        return await interaction.response.send_message(
+            embed=error_embed("잘못된 입력", "1 ~ 100 사이의 숫자를 입력해 주세요."),
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    deleted = await interaction.channel.purge(limit=개수)
+
+    result_e = discord.Embed(
+        title="🧹  청소 완료",
+        description=f"**{len(deleted)}개**의 메시지를 삭제했습니다.",
+        color=0x57F287,
+        timestamp=datetime.datetime.utcnow()
+    )
+    result_e.add_field(name="채널", value=interaction.channel.mention, inline=True)
+    result_e.add_field(name="실행자", value=interaction.user.mention, inline=True)
+    result_e.set_footer(text="성공")
+
+    await interaction.followup.send(embed=result_e, ephemeral=True)
+
+    # 로그
+    log_e = discord.Embed(title="🧹  청소 로그", color=0x57F287, timestamp=datetime.datetime.utcnow())
+    log_e.add_field(name="채널", value=interaction.channel.mention, inline=True)
+    log_e.add_field(name="삭제 수", value=f"**{len(deleted)}개**", inline=True)
+    log_e.add_field(name="실행자", value=f"{interaction.user.mention} (`{interaction.user}`)", inline=False)
+    await send_log(interaction.guild, embeds=[log_e])
+
+
+# ================== STICKY MESSAGE ==================
+@bot.tree.command(name="스티키", description="채널에 고정 메시지를 설정합니다. 새 메시지가 올라올 때마다 맨 아래로 이동합니다.")
+async def sticky_set(interaction: discord.Interaction, 내용: str):
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(
+            embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."),
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    # 기존 스티키 메시지가 있으면 삭제
+    existing = get_sticky(interaction.channel.id)
+    if existing:
+        try:
+            old_msg = await interaction.channel.fetch_message(existing[1])
+            await old_msg.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+    # 새 스티키 메시지 전송
+    sticky_e = discord.Embed(
+        title="📌  고정 메시지",
+        description=내용,
+        color=0xF1C40F,
+        timestamp=datetime.datetime.utcnow()
+    )
+    sticky_e.set_footer(text="📌 이 메시지는 채널 하단에 고정됩니다.")
+    msg = await interaction.channel.send(embed=sticky_e)
+
+    set_sticky(interaction.channel.id, interaction.guild.id, 내용, msg.id)
+
+    await interaction.followup.send(
+        embed=success_embed("스티키 설정 완료", f"이 채널에 고정 메시지가 설정되었습니다."),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="스티키해제", description="채널의 고정 메시지를 해제합니다.")
+async def sticky_remove(interaction: discord.Interaction):
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(
+            embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."),
+            ephemeral=True
+        )
+
+    existing = get_sticky(interaction.channel.id)
+    if not existing:
+        return await interaction.response.send_message(
+            embed=warn_embed("스티키 없음", "이 채널에 설정된 고정 메시지가 없습니다."),
+            ephemeral=True
+        )
+
+    try:
+        old_msg = await interaction.channel.fetch_message(existing[1])
+        await old_msg.delete()
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+    delete_sticky(interaction.channel.id)
+    await interaction.response.send_message(
+        embed=success_embed("스티키 해제 완료", "고정 메시지가 해제되었습니다."),
+        ephemeral=True
+    )
+
+
+# ================== STICKY ON_MESSAGE ==================
+# 스티키가 설정된 채널에 메시지가 오면 기존 스티키를 삭제하고 맨 아래로 다시 전송
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    await bot.process_commands(message)
+
+    if not message.guild:
+        return
+
+    sticky = get_sticky(message.channel.id)
+    if not sticky:
+        return
+
+    content, old_msg_id = sticky
+
+    # 기존 스티키 메시지 삭제
+    try:
+        old_msg = await message.channel.fetch_message(old_msg_id)
+        await old_msg.delete()
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+    # 새 위치(맨 아래)에 스티키 재전송
+    sticky_e = discord.Embed(
+        title="📌  고정 메시지",
+        description=content,
+        color=0xF1C40F,
+        timestamp=datetime.datetime.utcnow()
+    )
+    sticky_e.set_footer(text="📌 이 메시지는 채널 하단에 고정됩니다.")
+    new_msg = await message.channel.send(embed=sticky_e)
+
+    set_sticky(message.channel.id, message.guild.id, content, new_msg.id)
+
+
 # ================== PARTY COMMANDS ==================
 @bot.tree.command(name="파티생성", description="파티 음성 채널을 생성합니다.")
 async def party_create(interaction: discord.Interaction):
-    # 음성 채널 생성은 시간이 걸리므로 반드시 defer 먼저
     await interaction.response.defer()
 
     cur.execute("SELECT voice_id FROM party WHERE guild_id=? AND owner_id=?", (interaction.guild.id, interaction.user.id))
@@ -475,8 +651,8 @@ async def pay(interaction: discord.Interaction, 유저: discord.Member, 금액: 
 # ================== WARN ==================
 @bot.tree.command(name="경고", description="유저에게 경고를 부여합니다.")
 async def warn_cmd(interaction: discord.Interaction, 유저: discord.Member):
-    if not interaction.user.guild_permissions.moderate_members:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     c = add_warn(유저.id)
     e = discord.Embed(title="⚠️  경고 부여", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
@@ -489,8 +665,8 @@ async def warn_cmd(interaction: discord.Interaction, 유저: discord.Member):
 
 @bot.tree.command(name="경고삭제", description="유저의 경고를 초기화합니다.")
 async def warn_clear(interaction: discord.Interaction, 유저: discord.Member):
-    if not interaction.user.guild_permissions.moderate_members:
-        return await interaction.response.send_message(embed=error_embed("권한 없음"), ephemeral=True)
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(embed=error_embed("권한 없음", "봇 관리자 역할이 필요합니다."), ephemeral=True)
 
     clear_warn(유저.id)
     await interaction.response.send_message(embed=success_embed("경고 초기화 완료", f"{유저.mention} 경고 초기화 완료"))
@@ -539,7 +715,6 @@ async def on_member_join(member):
 @bot.event
 async def on_ready():
     init_db()
-    # 봇 재시작 후에도 버튼이 살아있도록 persistent view 등록
     bot.add_view(VerifyView())
     bot.add_view(TicketView())
     bot.add_view(TicketCloseView())
