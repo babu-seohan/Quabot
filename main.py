@@ -1,254 +1,231 @@
+# ================== IMPORT ==================
 import discord
 from discord.ext import commands
 import os
 import sqlite3
 import datetime
 import asyncio
-import random
 from flask import Flask
 from threading import Thread
 
-# ================= CONFIG =================
+# ================== CONFIG ==================
 TOKEN = os.getenv("TOKEN")
-VERIFY_ROLE_ID = 1499675598178750560
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= KEEP ALIVE =================
+# ================== KEEP ALIVE ==================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "BOT ONLINE"
 
-def run():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
 def keep_alive():
-    Thread(target=run, daemon=True).start()
+    Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
 
-# ================= DB =================
-DB = sqlite3.connect("bot.db", check_same_thread=False)
-CUR = DB.cursor()
+# ================== DB ==================
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
 
 def init_db():
-    CUR.execute("CREATE TABLE IF NOT EXISTS money (uid INTEGER PRIMARY KEY, bal INTEGER)")
-    CUR.execute("CREATE TABLE IF NOT EXISTS warn (gid INTEGER, uid INTEGER, cnt INTEGER)")
-    CUR.execute("CREATE TABLE IF NOT EXISTS sticky (cid INTEGER PRIMARY KEY, msg TEXT)")
-    CUR.execute("""
-    CREATE TABLE IF NOT EXISTS config (
-        gid INTEGER PRIMARY KEY,
-        welcome INTEGER,
-        log INTEGER,
-        ticket INTEGER
-    )
-    """)
-    DB.commit()
+    cur.execute("CREATE TABLE IF NOT EXISTS money (uid INTEGER PRIMARY KEY, bal INTEGER)")
+    cur.execute("CREATE TABLE IF NOT EXISTS warn (uid INTEGER PRIMARY KEY, cnt INTEGER)")
+    cur.execute("CREATE TABLE IF NOT EXISTS channel_config (guild_id INTEGER PRIMARY KEY, welcome INTEGER, log INTEGER)")
+    cur.execute("CREATE TABLE IF NOT EXISTS party (guild_id INTEGER, owner_id INTEGER, voice_id INTEGER)")
+    cur.execute("CREATE TABLE IF NOT EXISTS party_config (guild_id INTEGER PRIMARY KEY, category_id INTEGER, voice_id INTEGER)")
+    conn.commit()
 
-# ================= EMBED =================
+# ================== UTIL ==================
 def embed(t, d="", c=0x5865F2):
-    return discord.Embed(
-        title=f"✨ {t}",
-        description=d,
-        color=c,
-        timestamp=datetime.datetime.utcnow()
-    )
+    e = discord.Embed(title=t, description=d, color=c)
+    e.timestamp = datetime.datetime.utcnow()
+    return e
 
-# ================= ECONOMY =================
+# ================== MONEY ==================
 def money(uid):
-    CUR.execute("SELECT bal FROM money WHERE uid=?", (uid,))
-    r = CUR.fetchone()
+    cur.execute("SELECT bal FROM money WHERE uid=?", (uid,))
+    r = cur.fetchone()
     return r[0] if r else 0
-
-def set_money(uid, v):
-    CUR.execute("REPLACE INTO money VALUES (?,?)", (uid, max(v, 0)))
-    DB.commit()
 
 def add_money(uid, v):
-    set_money(uid, money(uid) + v)
+    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid)+v))
+    conn.commit()
 
-def remove_money(uid, v):
-    set_money(uid, money(uid) - v)
+def sub_money(uid, v):
+    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid)-v))
+    conn.commit()
 
-# ================= WARN SYSTEM =================
-def warn_count(gid, uid):
-    CUR.execute("SELECT cnt FROM warn WHERE gid=? AND uid=?", (gid, uid))
-    r = CUR.fetchone()
+# ================== WARN ==================
+def warn(uid):
+    cur.execute("SELECT cnt FROM warn WHERE uid=?", (uid,))
+    r = cur.fetchone()
     return r[0] if r else 0
 
-def add_warn(gid, uid):
-    c = warn_count(gid, uid) + 1
-    CUR.execute("REPLACE INTO warn VALUES (?,?,?)", (gid, uid, c))
-    DB.commit()
+def add_warn(uid):
+    c = warn(uid)+1
+    cur.execute("REPLACE INTO warn VALUES (?,?)", (uid,c))
+    conn.commit()
     return c
 
-def clear_warn(gid, uid):
-    CUR.execute("DELETE FROM warn WHERE gid=? AND uid=?", (gid, uid))
-    DB.commit()
+def clear_warn(uid):
+    cur.execute("REPLACE INTO warn VALUES (?,0)", (uid,))
+    conn.commit()
 
-async def punish(member, c):
-    try:
-        if c == 1:
-            await member.timeout(datetime.timedelta(minutes=10))
-        elif c == 2:
-            await member.timeout(datetime.timedelta(hours=1))
-        elif c == 3:
-            await member.timeout(datetime.timedelta(days=1))
-        elif c == 4:
-            await member.kick()
-        elif c >= 5:
-            await member.ban()
-    except:
-        pass
+# ================== PARTY ==================
+class PartyView(discord.ui.View):
+    @discord.ui.button(label="🎮 참가", style=discord.ButtonStyle.success)
+    async def join(self, i, b):
+        cur.execute("SELECT voice_id FROM party WHERE guild_id=? AND owner_id=?", (i.guild.id, i.user.id))
+        r = cur.fetchone()
 
-# ================= CHANNEL CONFIG =================
-def set_channel(gid, key, val):
-    CUR.execute("INSERT OR IGNORE INTO config (gid) VALUES (?)", (gid,))
-    CUR.execute(f"UPDATE config SET {key}=? WHERE gid=?", (val, gid))
-    DB.commit()
+        if r:
+            vc = i.guild.get_channel(r[0])
+            if vc:
+                await i.user.move_to(vc)
+                await i.response.send_message("참가 완료", ephemeral=True)
 
-def get_channel(gid, key):
-    CUR.execute(f"SELECT {key} FROM config WHERE gid=?", (gid,))
-    r = CUR.fetchone()
-    return r[0] if r else None
-
-# ================= STICKY =================
-@bot.event
-async def on_message(m):
-    if m.author.bot:
-        return
-
-    CUR.execute("SELECT msg FROM sticky WHERE cid=?", (m.channel.id,))
-    r = CUR.fetchone()
-
-    if r:
-        await m.channel.send(embed=embed("📌 스티키", r[0]))
-
-    await bot.process_commands(m)
-
-@bot.tree.command(name="스티키")
-async def sticky(i, msg: str):
-    CUR.execute("REPLACE INTO sticky VALUES (?,?)", (i.channel.id, msg))
-    DB.commit()
-    await i.response.send_message(embed=embed("스티키 설정 완료", msg))
-
-# ================= VERIFY =================
+# ================== VERIFY ==================
 class VerifyView(discord.ui.View):
     @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
-    async def v(self, i, b):
-        role = i.guild.get_role(VERIFY_ROLE_ID)
+    async def verify(self, i, b):
+
+        role = discord.utils.get(i.guild.roles, name="인증")
         if not role:
             role = await i.guild.create_role(name="인증")
 
         await i.user.add_roles(role)
-        await i.response.send_message(embed=embed("인증 완료"), ephemeral=True)
 
-# ================= TICKET =================
-class TicketView(discord.ui.View):
-    @discord.ui.button(label="티켓 생성", style=discord.ButtonStyle.primary)
-    async def create(self, i, b):
+        try:
+            await i.user.send(embed=embed("인증 완료", "서버 인증 완료"))
+        except:
+            pass
 
-        cat_id = get_channel(i.guild.id, "ticket")
-        cat = i.guild.get_channel(cat_id) if cat_id else None
+        await i.response.send_message("인증 완료", ephemeral=True)
 
-        ch = await i.guild.create_text_channel(
-            name=f"ticket-{i.user.id}",
-            category=cat
-        )
-
-        await ch.send(i.user.mention, view=CloseTicket())
-        await i.response.send_message(embed=embed("티켓 생성 완료"), ephemeral=True)
-
-class CloseTicket(discord.ui.View):
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
-    async def close(self, i, b):
-        await i.channel.delete()
-
-# ================= ADMIN PANEL =================
+# ================== ADMIN PANEL ==================
 class AdminPanel(discord.ui.View):
-    @discord.ui.button(label="서버 상태")
-    async def s(self, i, b):
-        await i.response.send_message(embed=embed("상태", "ONLINE"))
 
-    @discord.ui.button(label="경고 확인")
+    @discord.ui.button(label="🎮 파티", style=discord.ButtonStyle.primary)
+    async def p(self, i, b):
+        await i.response.send_message("파티 관리")
+
+    @discord.ui.button(label="⚠ 경고", style=discord.ButtonStyle.danger)
     async def w(self, i, b):
-        c = warn_count(i.guild.id, i.user.id)
-        await i.response.send_message(embed=embed("경고", f"{c}회"))
+        await i.response.send_message("경고 관리")
 
-# ================= CHANNEL SET =================
-@bot.tree.command(name="채널설정")
-async def set_ch(i, 종류: str, 채널: discord.TextChannel):
+    @discord.ui.button(label="🎟 티켓", style=discord.ButtonStyle.success)
+    async def t(self, i, b):
+        await i.response.send_message("티켓 관리")
 
-    mp = {
-        "입장": "welcome",
-        "로그": "log",
-        "티켓": "ticket"
-    }
+# ================== PARTY CREATE ==================
+@bot.tree.command(name="파티생성")
+async def party_create(i: discord.Interaction):
 
-    set_channel(i.guild.id, mp[종류], 채널.id)
-    await i.response.send_message(embed=embed("채널 설정 완료"))
+    cur.execute("SELECT category_id FROM party_config WHERE guild_id=?", (i.guild.id,))
+    r = cur.fetchone()
+    cat = i.guild.get_channel(r[0]) if r else None
 
-# ================= WARN COMMAND =================
+    vc = await i.guild.create_voice_channel(
+        name=f"🎮 파티-{i.user.display_name}",
+        category=cat
+    )
+
+    cur.execute("INSERT INTO party VALUES (?,?,?)", (i.guild.id, i.user.id, vc.id))
+    conn.commit()
+
+    await i.response.send_message(f"파티 생성됨 {vc.mention}")
+
+# ================== PARTY DELETE ==================
+@bot.tree.command(name="파티삭제")
+async def party_delete(i: discord.Interaction):
+
+    cur.execute("SELECT voice_id FROM party WHERE guild_id=? AND owner_id=?", (i.guild.id, i.user.id))
+    r = cur.fetchone()
+
+    if not r:
+        return await i.response.send_message("없음", ephemeral=True)
+
+    vc = i.guild.get_channel(r[0])
+    if vc:
+        await vc.delete()
+
+    cur.execute("DELETE FROM party WHERE guild_id=? AND owner_id=?", (i.guild.id, i.user.id))
+    conn.commit()
+
+    await i.response.send_message("삭제 완료")
+
+# ================== AUTO VOICE ==================
+@bot.event
+async def on_voice_state_update(member, before, after):
+
+    if member.bot:
+        return
+
+    cur.execute("SELECT voice_id FROM party_config WHERE guild_id=?", (member.guild.id,))
+    r = cur.fetchone()
+
+    if not r:
+        return
+
+    trigger = member.guild.get_channel(r[0])
+
+    if after.channel and trigger and after.channel.id == trigger.id:
+
+        cur.execute("SELECT voice_id FROM party WHERE guild_id=? AND owner_id=?",
+                    (member.guild.id, member.id))
+        p = cur.fetchone()
+
+        if p:
+            vc = member.guild.get_channel(p[0])
+            if vc:
+                await member.move_to(vc)
+
+# ================== ECONOMY ==================
+@bot.tree.command(name="잔액")
+async def bal(i, user: discord.Member=None):
+    user=user or i.user
+    await i.response.send_message(embed=embed("잔액", f"{user.mention}: {money(user.id)}"))
+
+@bot.tree.command(name="송금")
+async def pay(i, user: discord.Member, amt:int):
+    if money(i.user.id)<amt:
+        return await i.response.send_message("부족",ephemeral=True)
+
+    sub_money(i.user.id, amt)
+    add_money(user.id, amt)
+
+    await i.response.send_message("송금 완료")
+
+# ================== WARN CMD ==================
 @bot.tree.command(name="경고")
-async def warn(i, u: discord.Member, reason: str = "없음"):
+async def warn_cmd(i, user: discord.Member):
+    c = add_warn(user.id)
+    await i.response.send_message(f"{user.mention} {c}회")
 
+@bot.tree.command(name="경고삭제")
+async def warn_clear(i, user: discord.Member):
+    clear_warn(user.id)
+    await i.response.send_message("삭제")
+
+# ================== PANEL ==================
+@bot.tree.command(name="관리자패널")
+async def panel(i):
     if not i.user.guild_permissions.administrator:
         return await i.response.send_message("권한 없음", ephemeral=True)
 
-    c = add_warn(i.guild.id, u.id)
-    await punish(u, c)
+    await i.response.send_message(embed=embed("관리자패널"), view=AdminPanel())
 
-    await i.response.send_message(embed=embed("경고", f"{u.mention} → {c}회\n{reason}"))
-
-@bot.tree.command(name="경고확인")
-async def warn_check(i, u: discord.Member):
-    await i.response.send_message(embed=embed("경고 확인", f"{u.mention} → {warn_count(i.guild.id, u.id)}회"))
-
-@bot.tree.command(name="경고삭제")
-async def warn_clear(i, u: discord.Member):
-    clear_warn(i.guild.id, u.id)
-    await i.response.send_message(embed=embed("경고 삭제 완료"))
-
-# ================= ECONOMY =================
-@bot.tree.command(name="잔액")
-async def bal(i, u: discord.Member=None):
-    u = u or i.user
-    await i.response.send_message(embed=embed("잔액", f"{money(u.id)}원"))
-
-@bot.tree.command(name="송금")
-async def pay(i, u: discord.Member, amt: int):
-    if money(i.user.id) < amt:
-        return await i.response.send_message("잔액 부족", ephemeral=True)
-
-    remove_money(i.user.id, amt)
-    add_money(u.id, amt)
-
-    await i.response.send_message(embed=embed("송금 완료"))
-
-# ================= PANELS =================
-@bot.tree.command(name="관리자패널")
-async def panel(i):
-    await i.response.send_message(embed=embed("관리자 패널"), view=AdminPanel())
-
-@bot.tree.command(name="티켓패널")
-async def ticket(i):
-    await i.response.send_message(embed=embed("티켓 시스템"), view=TicketView())
-
-@bot.tree.command(name="인증패널")
-async def verify(i):
-    await i.response.send_message(embed=embed("인증 시스템"), view=VerifyView())
-
-# ================= READY =================
+# ================== EVENTS ==================
 @bot.event
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 FULL V4 SYSTEM READY")
+    print("🔥 FINAL BOT READY")
 
+# ================== RUN ==================
 def start():
     keep_alive()
     bot.run(TOKEN)
 
-if __name__ == "__main__":
-    start()
+start()
