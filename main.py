@@ -1,25 +1,13 @@
 # ================= 기본 =================
 import discord
 from discord.ext import commands
-import os, sqlite3, datetime, asyncio, random
+import os, sqlite3, datetime, random, asyncio
 from flask import Flask
 from threading import Thread
 
 TOKEN = os.getenv("TOKEN")
 
-# ================= 설정 =================
-WELCOME_CHANNEL_ID = 0
-LOG_CHANNEL_ID = 0
-TICKET_CATEGORY_ID = 0
-VERIFY_ROLE_ID = 0
-
 DB_PATH = "bot.db"
-
-SALARY = 100000
-ATTENDANCE = 500000
-MAX_BET = 1000000
-DICE_COST = 50000
-DICE_WIN = DICE_COST * 3
 
 # ================= 서버 유지 =================
 app = Flask(__name__)
@@ -36,47 +24,42 @@ cursor = conn.cursor()
 def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS money (id INTEGER PRIMARY KEY, bal INTEGER)")
     cursor.execute("CREATE TABLE IF NOT EXISTS warn (id INTEGER PRIMARY KEY, cnt INTEGER)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY, date TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS config (guild_id INTEGER PRIMARY KEY, log INTEGER, welcome INTEGER)")
     conn.commit()
 
 # ================= 유틸 =================
-def embed(t, d="", c=0x5865F2):
-    e = discord.Embed(title=t, description=d, color=c)
-    e.timestamp = datetime.datetime.utcnow()
+def embed(t,d="",c=0x5865F2):
+    e=discord.Embed(title=t,description=d,color=c)
+    e.timestamp=datetime.datetime.utcnow()
     return e
 
-def money(uid):
-    cursor.execute("SELECT bal FROM money WHERE id=?", (uid,))
+def get_config(guild_id):
+    cursor.execute("SELECT log, welcome FROM config WHERE guild_id=?", (guild_id,))
     r = cursor.fetchone()
-    return r[0] if r else 0
+    return r if r else (None, None)
 
-def set_money(uid, v):
-    cursor.execute("REPLACE INTO money VALUES (?,?)", (uid, max(v,0)))
+def set_config(guild_id, log=None, welcome=None):
+    cur_log, cur_wel = get_config(guild_id)
+
+    log = log if log is not None else cur_log
+    welcome = welcome if welcome is not None else cur_wel
+
+    cursor.execute("REPLACE INTO config VALUES (?,?,?)", (guild_id, log, welcome))
     conn.commit()
 
-def add_money(uid, v): set_money(uid, money(uid)+v)
-def rm_money(uid, v): set_money(uid, money(uid)-v)
-
-def warn(uid):
-    cursor.execute("SELECT cnt FROM warn WHERE id=?", (uid,))
-    r = cursor.fetchone()
-    return r[0] if r else 0
-
-def add_warn(uid):
-    c = warn(uid)+1
-    cursor.execute("REPLACE INTO warn VALUES (?,?)", (uid,c))
-    conn.commit()
-    return c
-
-def clear_warn(uid):
-    cursor.execute("REPLACE INTO warn VALUES (?,0)", (uid,))
-    conn.commit()
-
-def today(): return (datetime.datetime.utcnow()+datetime.timedelta(hours=9)).strftime("%Y-%m-%d")
+def log(bot, guild_id, text):
+    log_id, _ = get_config(guild_id)
+    if log_id:
+        ch = bot.get_channel(log_id)
+        if ch:
+            asyncio.create_task(ch.send(text))
 
 # ================= 봇 =================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+def is_admin(member):
+    return member.guild_permissions.administrator
 
 # ================= 이벤트 =================
 @bot.event
@@ -87,99 +70,55 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(m):
-    ch = bot.get_channel(WELCOME_CHANNEL_ID)
-    if ch:
-        await ch.send(embed=embed("환영", m.mention))
+    _, welcome_id = get_config(m.guild.id)
+    if welcome_id:
+        ch = bot.get_channel(welcome_id)
+        if ch:
+            await ch.send(embed=embed("🎉 환영", m.mention))
 
-# ================= 경제 =================
-@bot.tree.command(name="잔액")
-async def bal(i:discord.Interaction, user:discord.Member):
-    await i.response.send_message(embed=embed("잔액", f"{user.mention}: {money(user.id):,}원"))
+    log(bot, m.guild.id, f"👋 입장: {m}")
 
-@bot.tree.command(name="월급")
-async def salary(i:discord.Interaction):
-    add_money(i.user.id, SALARY)
-    await i.response.send_message(embed=embed("월급", f"+{SALARY:,}원"))
+# ================= 채널 설정 (추가됨) =================
 
-@bot.tree.command(name="출석")
-async def att(i:discord.Interaction):
-    if today()==cursor.execute("SELECT date FROM attendance WHERE id=?", (i.user.id,)).fetchone():
-        return await i.response.send_message("이미 출석")
-    cursor.execute("REPLACE INTO attendance VALUES (?,?)",(i.user.id,today()))
-    conn.commit()
-    add_money(i.user.id, ATTENDANCE)
-    await i.response.send_message(embed=embed("출석", f"+{ATTENDANCE:,}원"))
+@bot.tree.command(name="채널로그", description="로그 채널 설정")
+async def set_log_channel(i: discord.Interaction, 채널: discord.TextChannel):
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
-@bot.tree.command(name="송금")
-async def send(i:discord.Interaction, user:discord.Member, 금액:int):
-    if money(i.user.id)<금액: return await i.response.send_message("잔액 부족")
-    rm_money(i.user.id, 금액)
-    add_money(user.id, 금액)
-    await i.response.send_message(embed=embed("송금", f"{i.user.mention}→{user.mention} {금액:,}원"))
+    set_config(i.guild.id, log=채널.id)
 
-# ================= 게임 =================
-@bot.tree.command(name="홀짝")
-async def odd_even(i:discord.Interaction, 금액:int):
-    n=random.randint(1,100)
-    res="홀수" if n%2 else "짝수"
-    add_money(i.user.id, 금액)
-    await i.response.send_message(embed=embed("결과", f"{n} → {res}"))
+    await i.response.send_message(
+        embed=embed("✅ 설정 완료", f"로그 채널 → {채널.mention}")
+    )
 
-@bot.tree.command(name="주사위")
-async def dice(i:discord.Interaction):
-    if money(i.user.id)<DICE_COST: return await i.response.send_message("돈 부족")
-    n=random.randint(1,6)
-    if n==6:
-        add_money(i.user.id, DICE_WIN)
-        msg="당첨"
-    else:
-        rm_money(i.user.id, DICE_COST)
-        msg="실패"
-    await i.response.send_message(embed=embed("주사위", f"{n} → {msg}"))
+@bot.tree.command(name="채널입장", description="입장 채널 설정")
+async def set_welcome_channel(i: discord.Interaction, 채널: discord.TextChannel):
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
-# ================= 경고 =================
-@bot.tree.command(name="경고")
-async def warn_cmd(i:discord.Interaction, user:discord.Member):
-    c=add_warn(user.id)
-    await i.response.send_message(embed=embed("경고", f"{user.mention}: {c}회"))
+    set_config(i.guild.id, welcome=채널.id)
 
-@bot.tree.command(name="경고삭제")
-async def warn_clear_cmd(i:discord.Interaction, user:discord.Member):
-    clear_warn(user.id)
-    await i.response.send_message("초기화 완료")
+    await i.response.send_message(
+        embed=embed("✅ 설정 완료", f"입장 채널 → {채널.mention}")
+    )
 
-@bot.tree.command(name="경고확인")
-async def warn_check(i:discord.Interaction, user:discord.Member):
-    await i.response.send_message(embed=embed("경고", f"{user.mention}: {warn(user.id)}회"))
+@bot.tree.command(name="채널전체설정", description="로그 + 입장 채널 한번에 설정")
+async def set_all(i: discord.Interaction, 로그채널: discord.TextChannel, 입장채널: discord.TextChannel):
+    if not is_admin(i.user):
+        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
-# ================= 티켓 =================
-class TicketView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    set_config(i.guild.id, log=로그채널.id, welcome=입장채널.id)
 
-    @discord.ui.button(label="티켓 생성")
-    async def create(self,i,b):
-        cat=i.guild.get_channel(TICKET_CATEGORY_ID)
-        ch=await i.guild.create_text_channel(f"ticket-{i.user.id}",category=cat)
-        await ch.send(i.user.mention)
-        await i.response.send_message("생성",ephemeral=True)
+    await i.response.send_message(
+        embed=embed("🔥 전체 설정 완료",
+                    f"로그: {로그채널.mention}\n입장: {입장채널.mention}")
+    )
 
-@bot.tree.command(name="티켓패널")
-async def ticket_panel(i:discord.Interaction):
-    await i.response.send_message("티켓", view=TicketView())
+# ================= 테스트용 기본 명령 =================
 
-# ================= 인증 =================
-class VerifyView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-
-    @discord.ui.button(label="인증")
-    async def verify(self,i,b):
-        role=i.guild.get_role(VERIFY_ROLE_ID)
-        await i.user.add_roles(role)
-        await i.response.send_message("인증 완료",ephemeral=True)
-
-@bot.tree.command(name="인증패널")
-async def verify_panel(i:discord.Interaction):
-    await i.response.send_message("인증", view=VerifyView())
+@bot.tree.command(name="핑")
+async def ping(i:discord.Interaction):
+    await i.response.send_message("🏓 Pong!")
 
 # ================= 실행 =================
 async def main():
